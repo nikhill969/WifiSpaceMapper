@@ -6,6 +6,51 @@ is verified on real hardware before the next one starts.
 
 Hardware: 1× ESP32-WROOM-32 (CP2102 USB-UART) · SDK: ESP-IDF v5.5.4 · Host: Windows 11.
 
+## [RuView integration] — 2026-11-05 — Detector hardening (Hampel, masks, selection, quality gate)
+
+Implements Ranked Opportunities 1–3 from `RUView_Integration_ROI_Report.md`
+(port/adaptation of RuView components, MIT / MIT OR Apache-2.0).
+No firmware logic change: `main/main.c` was renamed `main/main.ino` (Arduino
+wrapper around the same from-scratch ESP-IDF pipeline).
+
+### Added
+- **tools/hampel.py** — standalone Hampel outlier filter (running median + MAD),
+  port of RuView `hampel.rs`. In `tools/detector.py` it runs as stage 1, before
+  gain removal, so a single bad sample cannot inflate the moving-window std.
+- **Guard/DC subcarrier masking** — 13 of 62 bins (band-edge guards + DC) are
+  neutralised before gain removal and excluded from the motion std. Helpers
+  live in **tools/component_4.py** as the single source of truth
+  (`tools/detector.py` imports them).
+- **tools/subcarrier_select.py** — variance-ratio subcarrier sensitivity
+  ranking (motion-var / static-var), port of the RuView selection module.
+- **Adaptive selection in tools/detector.py** — `_sel_feed`/`_adapt`/`_rebase`:
+  the detector buffers still frames during calibrate and motion frames from
+  the hysteresis state machine, ranks bins by motion-variance ratio once both
+  buffers are full, and commits the selection only if the narrowed metric
+  shows a measured improvement. The threshold is re-derived under the new
+  metric from the same still frames, so no recalibration pause. Verified:
+  24 of 62 bins selected, threshold 0.1498 -> 0.6189, MOTION/STILL still
+  separated, zero guard-bin leakage.
+- **Frame quality gating in tools/csi_stream.py** — `component_4.quality_score`
+  ports RuView's ADR-346-style validation (dead bins, amplitude spikes, RSSI
+  bounds, subcarrier count). All three sources (serial / replay / synthetic)
+  score frames; `Frame` now carries `quality`/`quality_status`. The CSIStream
+  loop flags frames below `min_quality` (default 0.25) but delivers them
+  anyway — degrade, don't drop, so a hardware fault shows as a degraded rate
+  instead of silently blank views. Adds `low_quality_rate`,
+  `dropped`/`dropped_total`, `reset_drop_count`.
+
+### Changed
+- **FPS estimator fix** — warmup now measures the frame rate with the MEDIAN
+  inter-frame interval instead of mean count/elapsed, so USB ~16 ms burst
+  delivery no longer inflates fps and stretches WINDOW/calibration. The
+  selftest's calibrated threshold changed accordingly (0.1498 -> 0.6189);
+  the detector still separates STILL from MOTION (selftest passes).
+- **Deduplicated mask helpers** — `detector.py` now imports guard/DC masks
+  from `component_4.py` instead of carrying its own copies.
+- **tools/wifi_visualizer.py** — radar view min-max radius normalisation,
+  clearing the curves on null frames, plot range pinning.
+
 ## [Visualizer] — 2026-06-30 — Real-time CSI visualizer + shared host engine
 
 Wraps up the single-ESP32 phase with a polished, user-facing host app. **No firmware
@@ -64,7 +109,8 @@ change** — this release is all host-side Python.
 ## [Throughput] — 2026-06-26 — 4× frame rate (single LTF + faster ping)
 
 ### Changed
-- **CSI capture trimmed to the Legacy LTF only** (`main/main.c`: `htltf_en=false`,
+- **CSI capture trimmed to the Legacy LTF only** (`main/main.c` — renamed
+  `main/main.ino` on 2026-11-05: `htltf_en=false`,
   `stbc_htltf2_en=false`, `ltf_merge_en=false`). Profiling the raw buffer showed
   each packet carried **3 redundant LTF blocks** (Legacy + 2× HT = 192 values) —
   the same channel measured three times. Dropping the HT blocks cuts the payload

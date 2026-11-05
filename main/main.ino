@@ -144,8 +144,15 @@ static void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_csi(true));
 }
 
-void app_main(void)
+void setup()
 {
+    Serial.begin(921600);          // matches the visualizer's default baud rate
     ESP_LOGI(TAG, "WiFi Space Mapper booting");
     wifi_init_sta();
+}
+
+void loop()
+{
+    // Everything happens in the Wi-Fi/event tasks; Arduino's loopTask is idle.
+    delay(1000);
 }

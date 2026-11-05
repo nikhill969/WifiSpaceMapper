@@ -281,11 +281,13 @@ nodes, a coarse heatmap of *where* activity is), not room geometry.
 - [x] **Throughput optimization** — single Legacy-LTF capture (3× smaller, uniform
       frames) + 10 ms ping → ~87 fps.
 - [x] **Rung 1 (PoC)** — gain-removal + moving-variance + calibrated-threshold detector.
-- [x] **Rate-independent detector** — seconds-based windows scaled by the measured fps.
+- [x] **Rate-independent detector** — seconds-based windows scaled by the median
+      inter-frame interval (immune to USB burst inflation).
 - [x] **Visualizer** — PyQtGraph/PySide6 dashboard (spectrogram, raw CSI, I/Q, radar,
       Doppler, motion) on a shared `csi_stream` engine, with a synthetic demo mode.
-- [ ] **Robustness** — subcarrier selection (drop guard/DC), Hampel outlier filter,
-      CV-based turbulence, P95 hysteresis hardening for cross-room generalization.
+- [x] **Robustness** — subcarrier selection (drop guard/DC), Hampel outlier filter,
+      median-interval fps fix, adaptive subcarrier selection, frame quality gating.
+      CV-based turbulence remains open.
 - [ ] **On-device gain lock** — ESPectre-style AGC/FFT gain locking in firmware, so the
       raw σ becomes a clean motion signal and detection can run on the ESP32 itself.
 - [ ] **Rung 2** — activity discrimination (empty / still / walking) via a classifier.
@@ -296,7 +298,7 @@ nodes, a coarse heatmap of *where* activity is), not room geometry.
 ## Repository layout
 
 ```
-main/main.c             from-scratch firmware: STA connect → CSI capture → self-ping → CSV
+main/main.ino           from-scratch firmware: STA connect → CSI capture → self-ping → CSV
 main/secrets.example.h  Wi-Fi credential template (copy to secrets.h)
 sdkconfig.defaults      CSI enabled + 921600 console baud (tracked build config)
 idf-shell.bat           one-click ESP-IDF-activated shell (works on both dev machines)
@@ -315,6 +317,22 @@ CHANGELOG.md            staged, hardware-verified build history
 ```
 
 ---
+
+## Attribution
+
+Parts of the host-side signal processing are ports or adaptations of components
+from [RuView](https://github.com/ruvnet/RuView) (MIT / MIT OR Apache-2.0):
+
+- `tools/hampel.py` and the Hampel stage in `tools/detector.py` — port of
+  `v2/crates/wifi-densepose-signal/src/hampel.rs` (running median + MAD outlier filter)
+- `tools/subcarrier_select.py` — port of the variance-ratio half of
+  `v2/crates/wifi-densepose-signal/src/subcarrier_selection.rs`
+- the guard/DC subcarrier masks and frame quality scoring in
+  `tools/component_4.py` (and their `tools/detector.py` integration) — adapted
+  from the RuView ADR-135/ADR-346 calibration and validation framework
+
+The mask and quality helpers live in `component_4.py` as the single source of
+truth; nothing is duplicated.
 
 ## Tech stack
 

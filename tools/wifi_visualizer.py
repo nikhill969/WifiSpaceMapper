@@ -314,18 +314,24 @@ class RadarView(View):
         self.curve = self.pw.plot(pen=pg.mkPen(CYAN, width=2))
         self.dots = pg.ScatterPlotItem(size=4, pen=None, brush=pg.mkBrush(57, 208, 216, 200))
         self.pw.addItem(self.dots)
+        lay.addWidget(self.pw)
 
     def update_view(self, s):
         f = s.latest
         if f is None or len(f.amp) == 0:
+            self.curve.setData([], [])
+            self.dots.setData([], [])
             return
         amp = f.amp
-        r = amp / (amp.max() + 1e-6)
+        r = (amp - amp.min()) / (amp.max() - amp.min() + 1e-6)   # min-max so a
+        # near-constant AGC offset doesn't crush the shape into a dot/pinwheel
+        r = 0.1 + 0.9 * r                                        # keep 0.1..1.0 radius
         th = np.linspace(0, 2 * np.pi, len(r), endpoint=False)
         x, y = r * np.cos(th), r * np.sin(th)
         x = np.append(x, x[0]); y = np.append(y, y[0])    # close the loop
         self.curve.setData(x, y)
         self.dots.setData(x, y)
+        self.pw.setRange(xRange=(-1.15, 1.15), yRange=(-1.15, 1.15), padding=0)
 
 
 class DopplerView(View):

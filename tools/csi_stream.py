@@ -35,6 +35,12 @@ from typing import Optional, List
 
 import numpy as np
 
+# Component 3 (RuView port): per-frame quality scoring for the degrade gate.
+from component_4 import quality_score
+
+# Frames scoring below this are flagged Degraded (still delivered, just marked).
+MIN_QUALITY_DEFAULT = 0.25
+
 # Matches the firmware's line format; group 1 = #values, 2 = rssi, 3 = the I/Q list.
 PATTERN = re.compile(r"CSI_DATA,(\d+),(-?\d+),\[(.*)\]")
 
@@ -90,6 +96,9 @@ class Frame:
     t: float                         # host arrival timestamp (time.time())
     imag: Optional[np.ndarray] = None  # raw I (None for replay sources)
     real: Optional[np.ndarray] = None  # raw Q (None for replay sources)
+    quality: Optional[float] = None    # component-3 score 0..1 (None = not scored)
+    quality_status: Optional[str] = None  # Accepted / Degraded / Empty
+
 
 
 # --------------------------------------------------------------------------- #
@@ -125,7 +134,10 @@ class SerialSource:
         if parsed is None:
             return None
         rssi, amp, imag, real = parsed
-        return Frame(amp=amp, rssi=rssi, t=time.time(), imag=imag, real=real)
+        # Component 3: score the frame (degrade-instead-of-reject, RuView style)
+        q, status, _ = quality_score(amp, rssi)
+        return Frame(amp=amp, rssi=rssi, t=time.time(), imag=imag, real=real,
+                     quality=q, quality_status=status)
 
     def close(self):
         try:
@@ -169,7 +181,8 @@ class ReplaySource:
         amp = self._amp[self._i]
         self._next_t = now + float(self._dt[self._i])
         self._i += 1
-        return Frame(amp=amp, rssi=None, t=now)
+        q, status, _ = quality_score(amp, None)
+        return Frame(amp=amp, rssi=None, t=now, quality=q, quality_status=status)
 
     def close(self):
         pass
@@ -245,7 +258,9 @@ class SyntheticSource:
             return None
         self._next_t = now + 1.0 / self._fps
         amp, rssi, imag, real = self.sample(now - self._t0)
-        return Frame(amp=amp, rssi=rssi, t=now, imag=imag, real=real)
+        q, status, _ = quality_score(amp, rssi)
+        return Frame(amp=amp, rssi=rssi, t=now, imag=imag, real=real,
+                     quality=q, quality_status=status)
 
     def close(self):
         pass
@@ -278,7 +293,7 @@ class CSIStream:
     a cheap "newest frame" repaint. `fps` is measured live from arrival times.
     """
 
-    def __init__(self, source, maxlen=4096):
+    def __init__(self, source, maxlen=4096, min_quality=None):
         self._source = source
         self._buf = deque(maxlen=maxlen)
         self._lock = threading.Lock()
@@ -288,6 +303,18 @@ class CSIStream:
         self._thread = None
         self.total = 0
         self.label = getattr(source, "label", getattr(source, "name", "source"))
+        # Component 3: degrade-not-drop quality gate (ADR-346 style). Frames
+        # scoring below min_quality are counted and flagged but still flow
+        # through, because silently discarding them can hide a hardware fault.
+        if min_quality is None:
+            min_quality = MIN_QUALITY_DEFAULT
+        self._min_quality = max(0.0, min(1.0, min_quality))
+        self.dropped = 0            # count of scored frames below the gate
+        self.dropped_total = 0      # same counter, lifetime
+        # Rolling flag-history over recent frames, fed like _fps_times so
+        # low_quality_rate survives arbitrary drain() cadence.
+        self._low_flags = deque(maxlen=240)
+        self._quality_seen = deque(maxlen=240)
 
     def start(self):
         self._running = True
@@ -305,7 +332,18 @@ class CSIStream:
             if frame is None:
                 time.sleep(0.001)
                 continue
+            # Component 3: score frames that arrive unscored, then gate.
+            if frame.quality is None:
+                q, status, _ = quality_score(frame.amp, frame.rssi)
+                frame.quality = q
+                frame.quality_status = status
+            low = (frame.quality is not None and frame.quality < self._min_quality)
             with self._lock:
+                if low:
+                    self.dropped += 1
+                    self.dropped_total += 1
+                self._low_flags.append(low)
+                self._quality_seen.append(frame.quality is not None)
                 self._buf.append(frame)
                 self._latest = frame
                 self._fps_times.append(frame.t)
@@ -334,6 +372,24 @@ class CSIStream:
     def rssi(self) -> Optional[int]:
         f = self._latest
         return f.rssi if f else None
+
+    @property
+    def low_quality_rate(self) -> float:
+        """Component 3 diagnostic: fraction of recent frames under the gate.
+
+        Computed over the rolling flag-history window (last ~240 frames),
+        which is independent of drain() cadence, so it recovers after a bad
+        patch instead of being poisoned forever by one spike.
+        """
+        with self._lock:
+            if not self._quality_seen:
+                return 0.0
+            return sum(1 for f in self._low_flags if f) / len(self._quality_seen)
+
+    def reset_drop_count(self):
+        """Clear the session drop counter (lifetime counter is kept)."""
+        with self._lock:
+            self.dropped = 0
 
     def stop(self):
         self._running = False
